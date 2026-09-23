@@ -23,8 +23,8 @@ density:
   tree: 50
   bush: 10
   rock: 5
-  grass: 50
-  sand: 5
+  grass: 0
+  sand: 0
 
 # Project paths (auto-detected from current directory if not set)
 # paths:

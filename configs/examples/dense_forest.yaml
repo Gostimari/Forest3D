@@ -2,12 +2,12 @@
 # Use for closed-canopy forest simulation with high vegetation density
 
 terrain:
-  scale_factor: 1.0
-  smooth_sigma: 0.5  # Less smoothing for varied terrain
+  scale_factor: 0.5
+  smooth_sigma: 0.0  # Less smoothing for varied terrain
 
 density:
-  tree: 200    # Dense tree coverage
-  bush: 50     # Understory vegetation
-  rock: 10     # Occasional rocks
-  grass: 300   # Ground cover
-  sand: 2      # Minimal sand
+  tree: 82    # Dense tree coverage
+  bush: 0     # Understory vegetation
+  rock: 0     # Occasional rocks
+  grass: 0   # Ground cover
+  sand: 0      # Minimal sand

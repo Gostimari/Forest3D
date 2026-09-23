@@ -64,26 +64,37 @@ class TerrainGenerator:
 
     def __init__(
             self,
-            tif_path: Path,
+            tif_path: Optional[Path] = None,
             output_path: Optional[Path] = None,
             config: Optional[TerrainConfig] = None,
             blender_path: Optional[Path] = None,
+            blend_path: Optional[Path] = None,
     ):
-        if not GDAL_AVAILABLE:
-            raise ImportError("GDAL is required. Install with: pip install GDAL")
-
-        self.tif_path = Path(tif_path)
-        if not self.tif_path.exists():
-            raise FileNotFoundError(f"DEM file not found: {self.tif_path}")
-
         self.config = config or TerrainConfig()
         self._blender_path = blender_path
         self._material_name = self.config.material_name
 
+        self.tif_path = Path(tif_path) if tif_path else None
+        self.blend_path = Path(blend_path) if blend_path else None
+
+        if self.tif_path is None and self.blend_path is None:
+            raise ValueError("Either tif_path or blend_path must be provided")
+
+        if self.tif_path is not None:
+            if not GDAL_AVAILABLE:
+                raise ImportError("GDAL is required for DEM terrain. Install with: pip install GDAL")
+            if not self.tif_path.exists():
+                raise FileNotFoundError(f"DEM file not found: {self.tif_path}")
+
+        if self.blend_path is not None and not self.blend_path.exists():
+            raise FileNotFoundError(f"Blend file not found: {self.blend_path}")
+
         if output_path:
             self.terrain_path = Path(output_path)
-        else:
+        elif self.tif_path is not None:
             self.terrain_path = self.tif_path.parent.parent
+        else:
+            self.terrain_path = self.blend_path.parent.parent
 
         self.mesh_path = self.terrain_path / "mesh"
         self.material_path = self.terrain_path / "material"
@@ -195,6 +206,100 @@ class TerrainGenerator:
             "z_extent": float(np.ptp(vertices[:, 2])),
             "num_vertices": len(vertices),
             "num_faces": len(faces),
+        }
+        logger.info(f"Terrain: X={stats['x_extent']:.2f}, Y={stats['y_extent']:.2f}, Z={stats['z_extent']:.2f}")
+        return stl_path, stats
+
+    def create_terrain_mesh_from_blend(self) -> Tuple[Path, dict]:
+        """Create terrain meshes (OBJ visual + STL collision) from a Blender file.
+
+        Exports all mesh objects in the .blend as OBJ (with UVs/materials) and
+        STL (for collision and height sampling by the forest populator).
+        """
+        if self.blend_path is None:
+            raise ValueError("No blend file configured")
+
+        blender_path = self._blender_path or find_blender()
+        if not blender_path:
+            raise RuntimeError("Blender not found. Install from https://www.blender.org/download/")
+
+        obj_path = self.mesh_path / "terrain.obj"
+        stl_path = self.mesh_path / "terrain.stl"
+
+        script = f'''
+import bpy
+
+bpy.ops.wm.open_mainfile(filepath={str(self.blend_path)!r})
+
+bpy.ops.object.select_all(action='DESELECT')
+mesh_objs = [o for o in bpy.data.objects if o.type == 'MESH']
+if not mesh_objs:
+    raise RuntimeError("No mesh objects found in blend file")
+for o in mesh_objs:
+    o.select_set(True)
+bpy.context.view_layer.objects.active = mesh_objs[0]
+
+# Export OBJ (visual with UVs and materials)
+try:
+    bpy.ops.wm.obj_export(filepath={str(obj_path)!r}, export_selected_objects=True, export_uv=True, export_normals=True, export_materials=True)
+except AttributeError:
+    bpy.ops.export_scene.obj(filepath={str(obj_path)!r}, use_selection=True, use_uv=True, use_normals=True, use_materials=True)
+
+# Export STL (collision + height sampling)
+try:
+    bpy.ops.wm.stl_export(filepath={str(stl_path)!r}, export_selected_objects=True)
+except AttributeError:
+    bpy.ops.export_mesh.stl(filepath={str(stl_path)!r}, use_selection=True)
+
+print("TERRAIN_EXPORTED")
+'''
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(script)
+            script_path = f.name
+
+        try:
+            result = subprocess.run(
+                [str(blender_path), "--background", "--python", script_path],
+                capture_output=True, text=True, timeout=300,
+            )
+            if not (obj_path.exists() and stl_path.exists()):
+                logger.error("Blender terrain export failed")
+                logger.debug(f"stdout: {result.stdout}")
+                logger.debug(f"stderr: {result.stderr}")
+                raise RuntimeError("Blender terrain mesh export failed")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Blender export timed out")
+        finally:
+            os.unlink(script_path)
+
+        logger.info(f"Created OBJ mesh: {obj_path}")
+        logger.info(f"Created STL mesh: {stl_path}")
+
+        # Blender's STL exporter converts Z-up to Y-up, swapping Y and Z and
+        # negating the height axis. The forest populator expects X-Y as ground
+        # and Z as height. Detect: if the STL's Y extent is smaller than its Z
+        # extent, the height axis ended up in Y — swap them back and negate Z.
+        terrain_mesh = stl_mesh.Mesh.from_file(str(stl_path))
+        vectors = terrain_mesh.vectors.reshape(-1, 3)
+        y_extent = float(np.ptp(vectors[:, 1]))
+        z_extent = float(np.ptp(vectors[:, 2]))
+        if y_extent < z_extent:
+            logger.info(
+                f"STL axis fix: Y extent ({y_extent:.2f}) < Z extent ({z_extent:.2f}), "
+                "swapping Y and Z to restore Z-up orientation"
+            )
+            terrain_mesh.vectors[:, :, [1, 2]] = terrain_mesh.vectors[:, :, [2, 1]]
+            terrain_mesh.vectors[:, :, 2] = -terrain_mesh.vectors[:, :, 2]
+            terrain_mesh.save(str(stl_path))
+            vectors = terrain_mesh.vectors.reshape(-1, 3)
+
+        stats = {
+            "x_extent": float(np.ptp(vectors[:, 0])),
+            "y_extent": float(np.ptp(vectors[:, 1])),
+            "z_extent": float(np.ptp(vectors[:, 2])),
+            "num_vertices": len(vectors),
+            "num_faces": len(terrain_mesh.vectors),
         }
         logger.info(f"Terrain: X={stats['x_extent']:.2f}, Y={stats['y_extent']:.2f}, Z={stats['z_extent']:.2f}")
         return stl_path, stats
@@ -376,7 +481,11 @@ class TerrainGenerator:
     ) -> Path:
         """Full terrain pipeline."""
         logger.info("Starting terrain generation...")
-        self.create_terrain_mesh(scale_factor, z_scale, smooth_sigma, enhance, uv_tile_scale)
+        if self.blend_path is not None:
+            self.create_terrain_mesh_from_blend()
+            self.extract_terrain_texture(self.blend_path)
+        else:
+            self.create_terrain_mesh(scale_factor, z_scale, smooth_sigma, enhance, uv_tile_scale)
         textures = self._find_textures()
         self._create_sdf_file(textures)
         self._create_config_file()

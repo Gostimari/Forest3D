@@ -24,7 +24,7 @@ class WorldPopulator:
     # Scale ranges for each model category
     SCALE_RANGES = {
         "tree": (0.8, 1.5),
-        "rock": (0.5, 2.0),
+        "rock": (0.25, 1.0),
         "bush": (0.3, 1.0),
         "grass": (0.2, 0.6),
         "sand": (1.0, 2.5),
@@ -62,7 +62,7 @@ class WorldPopulator:
     # Zone weights (edge vs center preference)
     ZONE_WEIGHTS = {
         "tree": {"edge": 0.2, "center": 0.8},
-        "rock": {"edge": 0.8, "center": 0.2},
+        "rock": {"edge": 0.2, "center": 0.8},
         "bush": {"edge": 0.4, "center": 0.6},
         "grass": {"edge": 0.5, "center": 0.5},
         "sand": {"edge": 0.7, "center": 0.3},
@@ -149,12 +149,85 @@ class WorldPopulator:
 
         return variants
 
+    def _get_model_vertices(self, category: str, variant: str) -> np.ndarray:
+        """Read vertex positions from a model's glTF file.
+
+        Returns:
+            (N, 3) array of vertex positions in local model coordinates.
+        """
+        import json
+        import struct
+
+        glb_path = self.models_path / category / variant / "mesh" / f"{variant}.glb"
+        if not glb_path.exists():
+            raise FileNotFoundError(f"Model glTF not found: {glb_path}")
+
+        with open(glb_path, "rb") as f:
+            f.read(12)  # GLB header
+            chunks = []
+            while True:
+                chunk_len_bytes = f.read(4)
+                if len(chunk_len_bytes) < 4:
+                    break
+                chunk_len = struct.unpack("<I", chunk_len_bytes)[0]
+                f.read(4)  # chunk type
+                chunks.append(f.read(chunk_len))
+
+        gltf = json.loads(chunks[0].decode())
+        bin_data = chunks[1]
+
+        # Find the first POSITION accessor
+        pos_accessor = None
+        for acc in gltf.get("accessors", []):
+            if acc.get("type") == "VEC3" and "min" in acc:
+                pos_accessor = acc
+                break
+
+        if pos_accessor is None:
+            raise ValueError(f"No POSITION accessor found in {glb_path}")
+
+        # Get buffer view
+        bv = gltf["bufferViews"][pos_accessor["bufferView"]]
+        offset = bv.get("byteOffset", 0)
+        count = pos_accessor["count"]
+
+        # Read FLOAT (componentType 5126) vertices
+        verts = np.frombuffer(
+            bin_data, dtype=np.float32, count=count * 3, offset=offset
+        ).reshape(count, 3).copy()
+
+        return verts
+
     def _get_terrain_mesh(self) -> mesh.Mesh:
         """Get terrain mesh for height sampling."""
         mesh_path = self.models_path / "ground" / "mesh" / "terrain.stl"
         if not mesh_path.exists():
             raise FileNotFoundError(f"Terrain mesh not found at: {mesh_path}")
         return mesh.Mesh.from_file(str(mesh_path))
+
+    def _build_triangle_index(self, terrain_mesh: mesh.Mesh) -> None:
+        """Build a KD-tree of triangle centroids for fast spatial lookup.
+
+        The height/normal sampling methods need the closest triangle to a
+        given (x, y) point. A brute-force scan over all triangles is O(n)
+        per call — with millions of faces and many sampling calls per
+        model, generation stalls. The KD-tree reduces lookup to O(log n).
+
+        Caches the tree and triangle centroids on the instance so it is
+        built only once per generation run.
+        """
+        from scipy.spatial import cKDTree
+
+        centroids = terrain_mesh.vectors.mean(axis=1)
+        self._terrain_centroids = centroids
+        self._terrain_kdtree = cKDTree(centroids[:, :2])
+
+    def _find_closest_triangle(self, terrain_mesh: mesh.Mesh, x: float, y: float):
+        """Find the closest terrain triangle to (x, y) using the KD-tree."""
+        if not hasattr(self, "_terrain_kdtree"):
+            self._build_triangle_index(terrain_mesh)
+        _, idx = self._terrain_kdtree.query([x, y])
+        return terrain_mesh.vectors[idx]
 
     def _get_random_variant(self, category: str) -> Optional[str]:
         """Get random variant for category."""
@@ -226,11 +299,7 @@ class WorldPopulator:
             Interpolated Z height at the given position.
         """
         point = np.array([x, y])
-        vectors = terrain_mesh.vectors
-
-        # Find closest triangle
-        distances = np.linalg.norm(vectors[:, :, :2] - point, axis=2)
-        closest_tri = vectors[np.argmin(distances.min(axis=1))]
+        closest_tri = self._find_closest_triangle(terrain_mesh, x, y)
 
         # Use barycentric interpolation for more accurate height
         # Fallback to mean if interpolation fails
@@ -251,6 +320,192 @@ class WorldPopulator:
             return z
         except Exception:
             return np.mean(closest_tri[:, 2])
+
+    def _check_terrain_support(
+            self,
+            terrain_mesh: mesh.Mesh,
+            x: float,
+            y: float,
+            scale: float,
+            sample_radius: float = 2.0,
+            max_height_diff: float = 1.5,
+    ) -> bool:
+        """Check that the terrain fully supports a model's footprint.
+
+        Samples terrain heights at the center and around a circle of the
+        model's footprint radius. If the height variation across the
+        footprint exceeds a threshold (scaled by model size), the terrain
+        has an edge or cliff and part of the model would float — reject.
+
+        Args:
+            terrain_mesh: Terrain mesh for height sampling.
+            x: X coordinate of the model center.
+            y: Y coordinate of the model center.
+            scale: Model scale factor.
+            sample_radius: Base radius (meters) for footprint sampling,
+                multiplied by scale.
+            max_height_diff: Base maximum allowed height difference (meters)
+                across the footprint, multiplied by scale.
+
+        Returns:
+            True if the terrain fully supports the footprint, False otherwise.
+        """
+        radius = sample_radius * scale
+        threshold = max_height_diff * scale
+
+        # Sample at center and 8 points around the footprint
+        sample_points = [(x, y)]
+        for i in range(8):
+            angle = i * (2 * np.pi / 8)
+            sx = x + radius * np.cos(angle)
+            sy = y + radius * np.sin(angle)
+            sample_points.append((sx, sy))
+
+        heights = [
+            self._sample_terrain_height(terrain_mesh, sx, sy)
+            for sx, sy in sample_points
+        ]
+
+        height_range = max(heights) - min(heights)
+        return height_range <= threshold
+
+    def _sample_terrain_normal(
+            self, terrain_mesh: mesh.Mesh, x: float, y: float
+    ) -> Tuple[float, float, float]:
+        """Sample terrain surface normal at given x, y coordinates.
+
+        Finds the closest triangle to (x, y) and returns its face normal,
+        oriented to point up (positive Z component).
+
+        Args:
+            terrain_mesh: The terrain mesh to sample from.
+            x: X coordinate.
+            y: Y coordinate.
+
+        Returns:
+            Tuple of (nx, ny, nz) unit normal vector at the terrain surface.
+        """
+        closest_tri = self._find_closest_triangle(terrain_mesh, x, y)
+
+        v0, v1, v2 = closest_tri
+        normal = np.cross(v1 - v0, v2 - v0)
+        length = np.linalg.norm(normal)
+        if length > 0:
+            normal /= length
+
+        if normal[2] < 0:
+            normal = -normal
+
+        return float(normal[0]), float(normal[1]), float(normal[2])
+
+    @staticmethod
+    def _slope_align_angles(
+            nx: float, ny: float, nz: float, yaw: float
+    ) -> Tuple[float, float, float]:
+        """Compute (roll, pitch, yaw) so the model's Z axis aligns with the
+        terrain surface normal, then rotates around the local Z by yaw.
+
+        Gazebo uses ZYX intrinsic Euler angles (R = Rz * Ry * Rx). A naive
+        roll/pitch from the normal breaks alignment when yaw is non-zero,
+        because yaw rotates around the world Z, not the slope normal. We
+        instead build R = R_align @ Rz(yaw) — which keeps the up axis locked
+        to the normal for any yaw — then decompose back to ZYX Euler.
+
+        Args:
+            nx, ny, nz: Terrain surface normal components.
+            yaw: Desired rotation around the local (slope-aligned) Z axis.
+
+        Returns:
+            Tuple of (roll, pitch, yaw) in radians for Gazebo's pose element.
+        """
+        n = np.array([nx, ny, nz], dtype=float)
+        n /= np.linalg.norm(n)
+        if n[2] < 0:
+            n = -n
+
+        # R_align = Ry(pitch0) @ Rx(roll0) maps [0,0,1] to n
+        roll0 = -np.arcsin(np.clip(n[1], -1, 1))
+        pitch0 = np.arctan2(n[0], n[2])
+
+        cr, sr = np.cos(roll0), np.sin(roll0)
+        cp, sp = np.cos(pitch0), np.sin(pitch0)
+        cy, sy = np.cos(yaw), np.sin(yaw)
+
+        # R = Ry(pitch0) @ Rx(roll0) @ Rz(yaw)
+        R00 = cp * cy + sp * sr * sy
+        R10 = cr * sy
+        R20 = -sp * cy + cp * sr * sy
+        R21 = sp * sy + cp * sr * cy
+        R22 = cp * cr
+
+        # Extract ZYX Euler from R = Rz(yaw') @ Ry(pitch') @ Rx(roll')
+        pitch_out = np.arcsin(np.clip(-R20, -1, 1))
+        roll_out = np.arctan2(R21, R22)
+        yaw_out = np.arctan2(R10, R00)
+
+        return float(roll_out), float(pitch_out), float(yaw_out)
+
+    def _compute_z_offset(
+            self,
+            category: str,
+            variant: str,
+            scale: float,
+            roll: float,
+            pitch: float,
+            yaw: float,
+    ) -> float:
+        """Compute the Z offset to seat a model's lowest point on the terrain.
+
+        Reads the actual mesh vertices (not just the bounding box) and
+        transforms them by the slope-aligned rotation to find the true
+        lowest point. Adds a penetration margin so the rock sinks slightly
+        into the terrain — ensuring contact for robot navigation rather
+        than floating with a gap.
+
+        Args:
+            category: Model category (e.g. "rock").
+            variant: Model variant name.
+            scale: Model scale factor.
+            roll, pitch, yaw: Rotation angles in radians.
+
+        Returns:
+            Z offset (meters) to subtract from the placement Z.
+        """
+        vert_cache_attr = "_vert_cache"
+        if not hasattr(self, vert_cache_attr):
+            setattr(self, vert_cache_attr, {})
+        cache = getattr(self, vert_cache_attr)
+        key = f"{category}/{variant}"
+        if key not in cache:
+            try:
+                cache[key] = self._get_model_vertices(category, variant)
+            except (FileNotFoundError, ValueError):
+                return 0.0
+
+        verts = cache[key]
+
+        # Build rotation matrix from ZYX Euler (Gazebo convention)
+        cr, sr = np.cos(roll), np.sin(roll)
+        cp, sp = np.cos(pitch), np.sin(pitch)
+        cy, sy = np.cos(yaw), np.sin(yaw)
+        R = np.array([
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp,     cp * sr,                cp * cr],
+        ])
+
+        # Rotate all vertices and find the true minimum Z
+        rotated = verts @ R.T
+        min_z = float(np.min(rotated[:, 2])) * scale
+        max_z = float(np.max(rotated[:, 2])) * scale
+        rock_height = max_z - min_z
+
+        # Penetration margin: sink the rock into the terrain by 15% of its
+        # height so there is no gap. The robot can drive over the embedded
+        # part; a small overlap with the terrain is better than floating.
+        penetration = rock_height * 0.15
+
+        return min_z + penetration
 
     def _get_random_position(
             self,
@@ -385,6 +640,11 @@ class WorldPopulator:
 
             if not self._check_distance_to_placed(x, y, category, scale):
                 continue
+
+            # For rocks, check that the terrain fully supports the footprint
+            if category == "rock":
+                if not self._check_terrain_support(terrain_mesh, x, y, scale):
+                    continue
 
             # Sample height from terrain
             z = self._sample_terrain_height(terrain_mesh, x, y)
@@ -537,10 +797,23 @@ class WorldPopulator:
                         pitch = np.random.uniform(-0.05, 0.05)
                         yaw = np.random.uniform(0, 2 * np.pi)
                     elif category == "rock":
-                        # Rocks can have more tilt
-                        roll = np.random.uniform(-0.15, 0.15)
-                        pitch = np.random.uniform(-0.15, 0.15)
+                        # Align rocks to terrain slope: sample the surface
+                        # normal and compute roll/pitch so the rock lies flat
+                        # on the slope instead of floating horizontally.
+                        nx, ny, nz = self._sample_terrain_normal(terrain_mesh, x, y)
                         yaw = np.random.uniform(0, 2 * np.pi)
+                        roll, pitch, yaw = self._slope_align_angles(
+                            nx, ny, nz, yaw
+                        )
+                        # Small jitter for natural variation
+                        roll += np.random.uniform(-0.1, 0.1)
+                        pitch += np.random.uniform(-0.1, 0.1)
+
+                        # Offset Z so the rock's lowest point sits on the
+                        # terrain surface after rotation. Without this, the
+                        # rock rotates around its center and the uphill edge
+                        # floats above the terrain.
+                        z -= self._compute_z_offset(category, variant, scale, roll, pitch, yaw)
                     elif category == "bush":
                         roll = np.random.uniform(-0.03, 0.03)
                         pitch = np.random.uniform(-0.03, 0.03)

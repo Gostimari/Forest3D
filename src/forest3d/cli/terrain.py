@@ -12,8 +12,12 @@ DEFAULT_OUTPUT = "./models/ground"
 
 @click.command()
 @click.option(
-    "--dem", "-d", "dem_path", type=click.Path(exists=True), required=True,
+    "--dem", "-d", "dem_path", type=click.Path(exists=True), required=False,
     help="Path to DEM file (GeoTIFF), typically in ./DEM/ folder"
+)
+@click.option(
+    "--blend", "blend_path", type=click.Path(exists=True),
+    help="Path to Blender file (.blend) to use as terrain mesh instead of a DEM"
 )
 @click.option(
     "--output", "-o", "output_path", type=click.Path(), default=DEFAULT_OUTPUT,
@@ -45,7 +49,7 @@ DEFAULT_OUTPUT = "./models/ground"
 # @click.option("--uv-tile", "-u", type=float, default=10.0, help="UV tile scale - texture repetition")
 
 @click.pass_context
-def terrain(ctx, dem_path, output_path, scale, smooth, enhance, texture_path, blender_path):
+def terrain(ctx, dem_path, blend_path, output_path, scale, smooth, enhance, texture_path, blender_path):
     """Generate terrain mesh from DEM data.
 
     Processes a Digital Elevation Model (GeoTIFF) file and creates:
@@ -83,13 +87,21 @@ def terrain(ctx, dem_path, output_path, scale, smooth, enhance, texture_path, bl
         # Custom options
         forest3d terrain -d ./DEM/terrain.tif -t ./Blender-Assets/soil/soil.blend --scale 2.0 --smooth 1.5
 
+        # Use a Blender model as the terrain (no DEM/GDAL needed)
+        forest3d terrain --blend ./Blender-Assets/soil/soil.blend
+
     \b
-    Note: This command requires GDAL to be installed. Use Docker for
-    easiest setup, or install GDAL manually.
+    Note: --dem requires GDAL to be installed. Use --blend to bypass GDAL
+    entirely by sourcing the terrain mesh from a Blender file.
     """
     console = ctx.obj["console"]
     logger = ctx.obj["logger"]
     config = load_config(ctx.obj.get("config_path"))
+
+    if not dem_path and not blend_path:
+        raise click.ClickException(
+            "Either --dem (GeoTIFF) or --blend (Blender file) is required."
+        )
 
     # Override config with CLI options
     if scale is not None:
@@ -105,7 +117,10 @@ def terrain(ctx, dem_path, output_path, scale, smooth, enhance, texture_path, bl
 
     # Show configuration
     console.print(f"[bold]Terrain Generation[/bold]")
-    console.print(f"  DEM: [cyan]{dem_path}[/cyan]")
+    if dem_path:
+        console.print(f"  DEM: [cyan]{dem_path}[/cyan]")
+    if blend_path:
+        console.print(f"  Blend: [cyan]{blend_path}[/cyan]")
     console.print(f"  Output: [cyan]{output_path}[/cyan]")
     if texture_path:
         console.print(f"  Texture: [cyan]{texture_path}[/cyan]")
@@ -122,27 +137,29 @@ def terrain(ctx, dem_path, output_path, scale, smooth, enhance, texture_path, bl
             # Import here to give helpful error if GDAL missing
             from forest3d.core.terrain import TerrainGenerator, GDAL_AVAILABLE
 
-            if not GDAL_AVAILABLE:
+            if dem_path and not GDAL_AVAILABLE:
                 raise click.ClickException(
-                    "GDAL is required for terrain generation.\n\n"
+                    "GDAL is required for DEM-based terrain generation.\n\n"
                     "Install options:\n"
                     "  1. Use Docker: docker run -v $(pwd):/workspace forest3d terrain ...\n"
                     "  2. Ubuntu/Debian: sudo apt install python3-gdal gdal-bin\n"
-                    "  3. See documentation for other platforms"
+                    "  3. See documentation for other platforms\n"
+                    "  4. Use --blend instead of --dem to bypass GDAL entirely"
                 )
 
             generator = TerrainGenerator(
-                tif_path=Path(dem_path),
+                tif_path=Path(dem_path) if dem_path else None,
+                blend_path=Path(blend_path) if blend_path else None,
                 output_path=Path(output_path) if output_path else None,
                 config=config.terrain,
                 blender_path=config.blender.path,
             )
 
-            progress.update(task, description="Processing DEM data...")
+            progress.update(task, description="Processing terrain...")
             result_path = generator.process_terrain()
 
-            # Extract textures from Blender file if provided
-            if config.terrain.texture_blend:
+            # Extract textures from Blender file if provided separately
+            if config.terrain.texture_blend and not blend_path:
                 progress.update(task, description="Extracting textures from Blender file...")
                 generator.extract_terrain_texture(config.terrain.texture_blend)
 

@@ -50,6 +50,10 @@ def load_config(config_path: Optional[Path] = None) -> Forest3DConfig:
     if config_path is None:
         config_path = find_config_file()
 
+    # Ensure config_path is a Path object (handles both str and Path)
+    if config_path and isinstance(config_path, str):
+        config_path = Path(config_path)
+
     if config_path and config_path.exists():
         with open(config_path) as f:
             config_dict = yaml.safe_load(f) or {}

@@ -53,7 +53,7 @@ class DensityConfig(BaseModel):
 
     tree: int = Field(default=50, ge=0, le=1000, description="Number of trees")
     bush: int = Field(default=10, ge=0, le=500, description="Number of bushes")
-    rock: int = Field(default=5, ge=0, le=200, description="Number of rocks")
+    rock: int = Field(default=5, ge=0, le=1000, description="Number of rocks")
     grass: int = Field(default=50, ge=0, le=2000, description="Number of grass patches")
     sand: int = Field(default=5, ge=0, le=100, description="Number of sand patches")
 
