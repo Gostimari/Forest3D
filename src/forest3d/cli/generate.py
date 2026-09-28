@@ -24,11 +24,15 @@ from forest3d.core.forest import WorldPopulator
     help="Output world file path"
 )
 @click.option(
+    "--terrain", "terrain_name", type=str, default=None,
+    help="Terrain model directory name under models/ (default: from config or 'ground')"
+)
+@click.option(
     "--verbose", "-v", is_flag=True,
     help="Show detailed statistics including scale info"
 )
 @click.pass_context
-def generate(ctx, base_path, density, output, verbose):
+def generate(ctx, base_path, density, output, terrain_name, verbose):
     """Generate a forest world from existing models.
 
     Procedurally places models on terrain using intelligent positioning
@@ -41,6 +45,12 @@ def generate(ctx, base_path, density, output, verbose):
         forest3d generate --density '{"tree": 100, "rock": 20}'
         forest3d generate -b ./my-project -o ./worlds/custom.world
         forest3d generate -v  # Show detailed stats
+
+    \b
+    Terrain model:
+        Uses models/<name>/ as the terrain, where <name> comes from
+        --terrain, or terrain.model_name in the config file (default: ground).
+        Example: forest3d generate --terrain ground-100-easy
 
     \b
     Default density:
@@ -58,6 +68,9 @@ def generate(ctx, base_path, density, output, verbose):
     console = ctx.obj["console"]
     logger = ctx.obj["logger"]
     config = load_config(ctx.obj.get("config_path"))
+
+    # Terrain model directory: CLI option > config file > "ground"
+    terrain_name = terrain_name or config.terrain.model_name
 
     # Parse density JSON if provided
     if density:
@@ -77,9 +90,16 @@ def generate(ctx, base_path, density, output, verbose):
         raise click.ClickException(
             f"Models directory not found in {project_base}\n\n"
             "Make sure you're in a Forest3D project directory with:\n"
-            "  - models/ground/  (terrain)\n"
+            f"  - models/{terrain_name}/  (terrain)\n"
             "  - models/tree/    (trees)\n"
             "  - etc."
+        )
+
+    if not (project_base / "models" / terrain_name).exists():
+        available = [d.name for d in (project_base / "models").iterdir() if d.is_dir()]
+        raise click.ClickException(
+            f"Terrain model directory not found: models/{terrain_name}\n\n"
+            f"Available model directories: {', '.join(available)}"
         )
 
     # Display configuration
@@ -120,9 +140,10 @@ def generate(ctx, base_path, density, output, verbose):
             populator = WorldPopulator(
                 base_path=project_base,
                 progress_callback=progress_callback,
+                terrain_name=terrain_name,
             )
 
-            world_path = populator.create_forest_world(density_config)
+            world_path = populator.create_forest_world(density_config, output_path=output)
 
             # Get statistics
             stats = populator.get_model_statistics()

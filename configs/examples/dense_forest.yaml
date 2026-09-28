@@ -4,6 +4,7 @@
 terrain:
   scale_factor: 0.5
   smooth_sigma: 0.0  # Less smoothing for varied terrain
+  # model_name: ground  # Terrain model directory under models/ (used by 'generate') factor
 
 density:
   tree: 82    # Dense tree coverage

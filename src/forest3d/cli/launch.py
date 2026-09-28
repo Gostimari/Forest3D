@@ -31,7 +31,7 @@ def find_gazebo() -> tuple[str, str]:
 @click.command()
 @click.option(
     "--world", "-w", "world_path", type=click.Path(exists=True),
-    help="Path to world file (default: worlds/forest_world.world)"
+    help="Path to world file (default: most recently generated .world in worlds/)"
 )
 @click.option(
     "--base-path", "-b", type=click.Path(exists=True),
@@ -94,13 +94,18 @@ def launch(ctx, world_path, base_path, verbose):
     if world_path:
         world_file = Path(world_path)
     else:
-        world_file = worlds_path / "forest_world.world"
-        if not world_file.exists():
+        world_files = sorted(
+            worlds_path.glob("*.world"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        ) if worlds_path.exists() else []
+        if not world_files:
             raise click.ClickException(
-                f"World file not found: {world_file}\n\n"
+                f"No world files found in {worlds_path}\n\n"
                 "Generate a world first:\n"
                 "  forest3d generate"
             )
+        world_file = world_files[0]
 
     console.print(f"[bold]Launching Gazebo {gz_version.title()}[/bold]")
     console.print(f"  World: [cyan]{world_file}[/cyan]")

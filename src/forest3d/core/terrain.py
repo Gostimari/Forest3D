@@ -343,6 +343,9 @@ print("TERRAIN_EXPORTED")
 
     def _create_sdf_file(self, textures: Optional[List[str]] = None) -> Path:
         """Create SDF with OBJ visual and STL collision."""
+        # Gazebo resolves model:// URIs by directory name, so the model
+        # name must match the output directory this terrain is written to.
+        model_name = self.terrain_path.name
         albedo_map = normal_map = roughness_map = None
 
         if textures:
@@ -369,13 +372,13 @@ print("TERRAIN_EXPORTED")
                     <specular>0.1 0.1 0.1 1</specular>
                     <pbr>
                         <metal>
-                            <albedo_map>model://ground/texture/{albedo_map}</albedo_map>'''
+                            <albedo_map>model://{model_name}/texture/{albedo_map}</albedo_map>'''
             if normal_map:
                 pbr += f'''
-                            <normal_map>model://ground/texture/{normal_map}</normal_map>'''
+                            <normal_map>model://{model_name}/texture/{normal_map}</normal_map>'''
             if roughness_map:
                 pbr += f'''
-                            <roughness_map>model://ground/texture/{roughness_map}</roughness_map>'''
+                            <roughness_map>model://{model_name}/texture/{roughness_map}</roughness_map>'''
             pbr += '''
                             <metalness>0.0</metalness>
                         </metal>
@@ -395,14 +398,14 @@ print("TERRAIN_EXPORTED")
             <collision name="collision">
                 <geometry>
                     <mesh>
-                        <uri>model://ground/mesh/terrain.stl</uri>
+                        <uri>model://{model_name}/mesh/terrain.stl</uri>
                     </mesh>
                 </geometry>
             </collision>
             <visual name="visual">
                 <geometry>
                     <mesh>
-                        <uri>model://ground/mesh/terrain.obj</uri>
+                        <uri>model://{model_name}/mesh/terrain.obj</uri>
                     </mesh>
                 </geometry>
 {pbr}
@@ -415,9 +418,10 @@ print("TERRAIN_EXPORTED")
         return sdf_path
 
     def _create_config_file(self) -> Path:
-        content = '''<?xml version="1.0"?>
+        model_name = self.terrain_path.name
+        content = f'''<?xml version="1.0"?>
 <model>
-    <name>ground</name>
+    <name>{model_name}</name>
     <version>1.0</version>
     <sdf version="1.8">model.sdf</sdf>
     <author>
@@ -431,7 +435,7 @@ print("TERRAIN_EXPORTED")
         return path
 
     def _create_test_world(self) -> Path:
-        content = '''<?xml version="1.0" ?>
+        content = f'''<?xml version="1.0" ?>
 <sdf version="1.8">
     <world name="terrain_test">
         <scene>
@@ -455,7 +459,7 @@ print("TERRAIN_EXPORTED")
         </light>
         <include>
             <name>terrain</name>
-            <uri>model://ground</uri>
+            <uri>model://{self.terrain_path.name}</uri>
         </include>
     </world>
 </sdf>'''

@@ -39,6 +39,10 @@ class TerrainConfig(BaseModel):
     material_name: str = Field(
         default="Terrain/Ground", description="Name for the generated material"
     )
+    model_name: str = Field(
+        default="ground",
+        description="Terrain model directory name under models/ (used by 'generate')",
+    )
 
     @field_validator("texture_blend", mode="before")
     @classmethod

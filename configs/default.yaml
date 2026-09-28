@@ -16,7 +16,8 @@ terrain:
   scale_factor: 1.0     # Scale multiplier for terrain
   smooth_sigma: 1.0     # Gaussian smoothing (0 = no smoothing)
   enhance: false        # Enable DEM resolution enhancement
-  enhance_scale: 6.0    # Enhancement scale factor
+  enhance_scale: 6.0    # Enhancement scale
+  # model_name: ground  # Terrain model directory under models/ (used by 'generate') factor
 
 # Default model density for forest generation
 density:

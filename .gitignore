@@ -42,3 +42,5 @@ models/
 worlds/
 Blender-Assets/*.blend
 Blender-Assets/**/*.blend
+Blender-Assets/*.blend1
+Blender-Assets/**/*.blend1

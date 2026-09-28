@@ -72,12 +72,14 @@ class WorldPopulator:
             self,
             base_path: Path,
             progress_callback: Optional[Callable[[int, str], None]] = None,
+            terrain_name: str = "ground",
     ):
         """Initialize the world populator.
 
         Args:
             base_path: Project base path containing models/ and worlds/.
             progress_callback: Optional callback for progress updates (percent, message).
+            terrain_name: Terrain model directory name under models/ (default: "ground").
 
         Raises:
             FileNotFoundError: If required paths don't exist.
@@ -85,6 +87,7 @@ class WorldPopulator:
         self.base_path = Path(base_path)
         self.models_path = self.base_path / "models"
         self.worlds_path = self.base_path / "worlds"
+        self.terrain_name = terrain_name
         self.progress_callback = progress_callback
 
         # Store (x, y, z, scale) for each placed model
@@ -102,7 +105,7 @@ class WorldPopulator:
     def _verify_paths(self) -> None:
         """Verify all required paths exist."""
         required_paths = [
-            self.models_path / "ground",
+            self.models_path / self.terrain_name,
             self.worlds_path,
             ]
 
@@ -122,7 +125,7 @@ class WorldPopulator:
             if not path.exists():
                 missing_paths.append(str(path))
 
-        if self.models_path / "ground" not in [Path(p) for p in missing_paths]:
+        if self.models_path / self.terrain_name not in [Path(p) for p in missing_paths]:
             # Ground is required
             pass
         elif missing_paths:
@@ -200,7 +203,7 @@ class WorldPopulator:
 
     def _get_terrain_mesh(self) -> mesh.Mesh:
         """Get terrain mesh for height sampling."""
-        mesh_path = self.models_path / "ground" / "mesh" / "terrain.stl"
+        mesh_path = self.models_path / self.terrain_name / "mesh" / "terrain.stl"
         if not mesh_path.exists():
             raise FileNotFoundError(f"Terrain mesh not found at: {mesh_path}")
         return mesh.Mesh.from_file(str(mesh_path))
@@ -705,11 +708,14 @@ class WorldPopulator:
     def create_forest_world(
             self,
             density_config: Optional[Dict[str, int]] = None,
+            output_path: Optional[Path] = None,
     ) -> Path:
         """Create forest world with placed models.
 
         Args:
             density_config: Dict of category -> count. Uses defaults if None.
+            output_path: Optional world file path. Defaults to
+                worlds/forest_<terrain_name>.world.
 
         Returns:
             Path to created world file.
@@ -732,7 +738,7 @@ class WorldPopulator:
             }
 
         # Create world with shared base (plugins, physics, gravity, sun)
-        world_elem, world = create_world_base("forest_world")
+        world_elem, world = create_world_base(f"forest_{self.terrain_name}")
 
         # Add scene settings for proper PBR lighting
         self._add_scene_settings(world)
@@ -742,7 +748,7 @@ class WorldPopulator:
 
         # Add terrain
         terrain = ET.SubElement(world, "include")
-        ET.SubElement(terrain, "uri").text = "model://ground"
+        ET.SubElement(terrain, "uri").text = f"model://{self.terrain_name}"
         ET.SubElement(terrain, "name").text = "terrain"
         ET.SubElement(terrain, "pose").text = "0 0 0 0 0 0"
 
@@ -845,7 +851,11 @@ class WorldPopulator:
             logger.info(f"  {category}: placed {category_placed}/{count} (failed: {category_failed})")
 
         # Save the world file
-        output_path = self.worlds_path / "forest_world.world"
+        if output_path is None:
+            output_path = self.worlds_path / f"forest_{self.terrain_name}.world"
+        else:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
         write_world_file(world_elem, output_path)
 
         logger.info(f"World file created at: {output_path}")
